@@ -1,0 +1,65 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-lookup-alerts
+    folder: Order Tracker
+    interval: 10s
+    rules:
+      - uid: order_lookup_5xx
+        title: Order lookup returned 5xx responses
+        condition: B
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(order_lookup_requests_total{http_route="/api/orders/{order_id}",http_response_status_code=~"5.."}[5m])) or vector(0)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              range: false
+              refId: A
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [A]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                name: Expression
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+              type: classic_conditions
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: Order lookup has returned one or more 5xx responses.
+          description: The order lookup route /api/orders/{order_id} had 5xx responses during the last 5 minutes.
+          dashboard_url: http://localhost:3000/d/order-lookup-telemetry/order-lookup-telemetry
+          evaluation_window: 5m
+        labels:
+          endpoint: /api/orders/{order_id}
+          severity: warning
