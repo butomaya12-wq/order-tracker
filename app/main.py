@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,11 +8,42 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from opentelemetry._logs import SeverityNumber
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import ConsoleLogRecordExporter, SimpleLogRecordProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExportingMetricReader
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
 from pydantic import BaseModel, Field
 
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
+ORDER_LOOKUP_ROUTE = "/api/orders/{order_id}"
+
+
+resource = Resource.create({"service.name": "order-tracker"})
+
+tracer_provider = TracerProvider(resource=resource)
+tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=sys.__stdout__)))
+tracer = tracer_provider.get_tracer("order-tracker.order-lookup")
+
+metric_reader = PeriodicExportingMetricReader(ConsoleMetricExporter(out=sys.__stdout__))
+meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+meter = meter_provider.get_meter("order-tracker.order-lookup")
+order_lookup_requests = meter.create_counter(
+    "order.lookup.requests",
+    unit="{request}",
+    description="Number of order lookup requests",
+)
+
+logger_provider = LoggerProvider(resource=resource)
+logger_provider.add_log_record_processor(
+    SimpleLogRecordProcessor(ConsoleLogRecordExporter(out=sys.__stdout__))
+)
+order_lookup_logger = logger_provider.get_logger("order-tracker.order-lookup")
 
 
 def connect():
@@ -100,8 +132,25 @@ def list_orders():
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: str):
-    with connect() as db:
-        row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+    with tracer.start_as_current_span("order.lookup") as span:
+        with connect() as db:
+            row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+        status_code = 404 if row is None else 200
+        attributes = {
+            "http.route": ORDER_LOOKUP_ROUTE,
+            "http.response.status_code": status_code,
+        }
+        span.set_attributes({"http.request.method": "GET", **attributes})
+        order_lookup_requests.add(1, attributes)
+        meter_provider.force_flush()
+        order_lookup_logger.emit(
+            body="order lookup completed",
+            severity_number=SeverityNumber.INFO,
+            severity_text="INFO",
+            attributes=attributes,
+        )
+
     if row is None:
         raise HTTPException(404, "Order not found")
     return order_detail(row)
