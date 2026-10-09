@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,29 +8,40 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from opentelemetry._logs import SeverityNumber
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggerProvider
-from opentelemetry.sdk._logs.export import ConsoleLogRecordExporter, SimpleLogRecordProcessor
+from opentelemetry.sdk._logs.export import SimpleLogRecordProcessor
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import ConsoleSpanExporter, SimpleSpanProcessor
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from pydantic import BaseModel, Field
 
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
 ORDER_LOOKUP_ROUTE = "/api/orders/{order_id}"
+OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
 
 resource = Resource.create({"service.name": "order-tracker"})
 
 tracer_provider = TracerProvider(resource=resource)
-tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter(out=sys.__stdout__)))
+if OTLP_ENDPOINT:
+    tracer_provider.add_span_processor(
+        SimpleSpanProcessor(OTLPSpanExporter(endpoint=OTLP_ENDPOINT, insecure=True))
+    )
 tracer = tracer_provider.get_tracer("order-tracker.order-lookup")
 
-metric_reader = PeriodicExportingMetricReader(ConsoleMetricExporter(out=sys.__stdout__))
-meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
+metric_readers = []
+if OTLP_ENDPOINT:
+    metric_readers.append(
+        PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=OTLP_ENDPOINT, insecure=True))
+    )
+meter_provider = MeterProvider(resource=resource, metric_readers=metric_readers)
 meter = meter_provider.get_meter("order-tracker.order-lookup")
 order_lookup_requests = meter.create_counter(
     "order.lookup.requests",
@@ -40,9 +50,10 @@ order_lookup_requests = meter.create_counter(
 )
 
 logger_provider = LoggerProvider(resource=resource)
-logger_provider.add_log_record_processor(
-    SimpleLogRecordProcessor(ConsoleLogRecordExporter(out=sys.__stdout__))
-)
+if OTLP_ENDPOINT:
+    logger_provider.add_log_record_processor(
+        SimpleLogRecordProcessor(OTLPLogExporter(endpoint=OTLP_ENDPOINT, insecure=True))
+    )
 order_lookup_logger = logger_provider.get_logger("order-tracker.order-lookup")
 
 
