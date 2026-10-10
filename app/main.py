@@ -98,7 +98,7 @@ def order_detail(row):
     order = as_dict(row)
     if order["priority"] == "express":
         placed_at = datetime.fromisoformat(order["created_at"])
-        estimated_at = placed_at.replace(day=placed_at.day + 2)
+        estimated_at = placed_at + timedelta(days=2)
         order["estimated_delivery"] = estimated_at.date().isoformat()
     return order
 
@@ -147,24 +147,31 @@ def get_order(order_id: str):
         with connect() as db:
             row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
 
-        status_code = 404 if row is None else 200
-        attributes = {
-            "http.route": ORDER_LOOKUP_ROUTE,
-            "http.response.status_code": status_code,
-        }
-        span.set_attributes({"http.request.method": "GET", **attributes})
-        order_lookup_requests.add(1, attributes)
-        meter_provider.force_flush()
-        order_lookup_logger.emit(
-            body="order lookup completed",
-            severity_number=SeverityNumber.INFO,
-            severity_text="INFO",
-            attributes=attributes,
-        )
+        status_code = 500
+        try:
+            order = order_detail(row) if row else None
+            status_code = 404 if order is None else 200
+        except Exception:
+            status_code = 500
+            raise
+        finally:
+            attributes = {
+                "http.route": ORDER_LOOKUP_ROUTE,
+                "http.response.status_code": status_code,
+            }
+            span.set_attributes({"http.request.method": "GET", **attributes})
+            order_lookup_requests.add(1, attributes)
+            meter_provider.force_flush()
+            order_lookup_logger.emit(
+                body="order lookup completed",
+                severity_number=SeverityNumber.INFO,
+                severity_text="INFO",
+                attributes=attributes,
+            )
 
-    if row is None:
+    if order is None:
         raise HTTPException(404, "Order not found")
-    return order_detail(row)
+    return order
 
 
 @app.post("/api/orders", status_code=201)
